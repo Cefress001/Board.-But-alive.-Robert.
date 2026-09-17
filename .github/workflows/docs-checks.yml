@@ -19,17 +19,9 @@ jobs:
       pull-requests: write
 
     steps:
-      - name: Generate GitHub App Token
-        id: app-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.DOCS_BOT_APP_ID }}
-          private-key: ${{ secrets.DOCS_BOT_PRIVATE_KEY }}
-
       - name: Checkout Head Branch
         uses: actions/checkout@v4
         with:
-          token: ${{ steps.app-token.outputs.token }}
           repository: ${{ github.event.pull_request.head.repo.full_name }}
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
@@ -37,7 +29,7 @@ jobs:
       - name: Set up Node.js Runtime
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Run Multi-Stage Linters & Formatters
         run: |
