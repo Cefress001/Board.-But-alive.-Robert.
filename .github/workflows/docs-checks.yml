@@ -1,7 +1,7 @@
-name: Docs Self-Healing Pipeline
+name: Enterprise Docs Self-Healing Pipeline
 
 on:
-  pull_request_target:
+  pull_request:
     types: [opened, synchronize, reopened]
     paths:
       - '**.md'
@@ -11,50 +11,61 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
+# Default global lockdown: Read-only access across the entire workflow
+permissions:
+  contents: read
+
 jobs:
   auto-heal-docs:
+    name: Sanitize and Format Documentation
     runs-on: ubuntu-latest
+    timeout-minutes: 5 # Guardrail against hanging processes or deadlocks
+    
+    # Strict scoped escalation: Write access restricted only to this execution context
     permissions:
       contents: write
       pull-requests: write
 
     steps:
-      - name: Generate GitHub App Token
-        id: app-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.DOCS_BOT_APP_ID }}
-          private-key: ${{ secrets.DOCS_BOT_PRIVATE_KEY }}
-
       - name: Checkout Head Branch
-        uses: actions/checkout@v4
+        # Supply-chain security: Cryptographic SHA pinning instead of floating tags
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          token: ${{ steps.app-token.outputs.token }}
-          repository: ${{ github.event.pull_request.head.repo.full_name }}
-          ref: ${{ github.event.pull_request.head.ref }}
-          fetch-depth: 0
+          ref: ${{ github.head_ref }}
+          fetch-depth: 1 # Shallow clone optimized for speed
 
       - name: Set up Node.js Runtime
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af
         with:
-          node-version: 20
+          node-version: 22
+          cache: 'npm' # Caches node modules to eliminate download latency on repeat runs
 
-      - name: Run Multi-Stage Linters & Formatters
+      - name: Deploy Centralized Toolchain
+        run: npm install -g prettier markdownlint-cli2
+
+      - name: Execute Multi-Stage Linters & Formatters
+        id: format
         run: |
-          npx --yes prettier --write "**/*.md"
-          npx --yes markdownlint-cli2 --fix "**/*.md" || true
+          prettier --write "**/*.md"
+          markdownlint-cli2 --fix "**/*.md" || true
+          
+          # Strict state verification to prevent empty commits or loops
+          MODIFIED_FILES=$(git diff --name-only)
+          if [ -n "$MODIFIED_FILES" ]; then
+            echo "files_changed=true" >> "$GITHUB_OUTPUT"
+            echo "## 📝 Documentation Auto-Healed" >> $GITHUB_STEP_SUMMARY
+            echo "The following files were normalized:" >> $GITHUB_STEP_SUMMARY
+            echo "$MODIFIED_FILES" | sed 's/^/- /' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "files_changed=false" >> "$GITHUB_OUTPUT"
+            echo "## ✅ Documentation Compliant" >> $GITHUB_STEP_SUMMARY
+            echo "No formatting changes were required." >> $GITHUB_STEP_SUMMARY
+          fi
 
       - name: Commit and Push Verified Corrections
-        env:
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          if [ -n "$(git status --porcelain)" ]; then
-            git add .
-            git commit -m "style(docs): format markdown via self-healing pipeline [skip ci]"
-            git push origin "HEAD:$HEAD_REF"
-          else
-            echo "All documentation files already meet formatting specifications."
-          fi
+        if: steps.format.outputs.files_changed == 'true'
+        uses: stefanzweifel/git-auto-commit-action@e348103e9026cc0eee322c6dabc5c2cb5ecd1f67
+        with:
+          commit_message: "style(docs): enforce markdown specifications via self-healing pipeline [skip ci]"
+          commit_user_name: "github-actions[bot]"
+          commit_user_email: "41898282+github-actions[bot]@users.noreply.github.com"
