@@ -1,74 +1,59 @@
-name: Enterprise Docs Self-Healing Pipeline
+name: Docs Checks
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
     paths:
-      - '**.md'
-      - '**.mdx'
-      - '**.markdown'
+      - '**/*.md'
+      - '**/*.mdx'
+      - '**/*.markdown'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: read                      # [HOLD] global ceiling stays read-only
 
 jobs:
-  auto-heal-docs:
-    name: Sanitize, Audit, and Format Documentation
+  validate:
+    name: Validate documentation formatting
     runs-on: ubuntu-latest
-    timeout-minutes: 5
-
-    permissions:
-      contents: write
-      pull-requests: write
-      statuses: write
+    timeout-minutes: 10
 
     steps:
-      - name: Checkout Head Branch
-        uses: actions/checkout@v4
+      - name: Checkout PR Head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ github.head_ref }}
-          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false  # [HOLD] no token in .git/config on read-only job
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
         with:
           node-version: '20'
+          cache: 'npm'
 
-      - name: Install Linter and Formatter
-        run: npm install -g prettier markdownlint-cli --silent
+      - name: Install dependencies
+        run: npm ci
 
-      - name: Generate Pre-Audit Cryptographic Checksum
+      - name: Check formatting
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          echo "### 🔐 Pre-Formatting Document Fingerprints" >> $GITHUB_STEP_SUMMARY
-          find . -name "*.md" -o -name "*.mdx" | sort | xargs sha256sum >> $GITHUB_STEP_SUMMARY
-
-      - name: Run Self-Healing Formatting Silently
-        id: format
-        run: |
-          prettier --write "**/*.md" "**/*.mdx" > /dev/null 2>&1 || true
-          markdownlint --fix "**/*.md" "**/*.mdx" > /dev/null 2>&1 || true
+          set -uo pipefail
+          BASE="origin/$BASE_REF"
           
-          if [[ -n "$(git status --porcelain)" ]]; then
-            echo "files_changed=true" >> $GITHUB_OUTPUT
-          else
-            echo "files_changed=false" >> $GITHUB_OUTPUT
+          mapfile -t FILES < <(
+            git diff --name-only --diff-filter=ACMR "$BASE...HEAD" \
+              -- '*.md' '*.mdx' '*.markdown' \
+              ':!node_modules/**' ':!vendor/**' ':!dist/**' ':!**/generated/**' \
+              ':!CHANGELOG.md'
+          )
+
+          if [ ${#FILES[@]} -eq 0 ]; then
+            exit 0
           fi
 
-      - name: Generate Post-Audit Cryptographic Checksum
-        if: steps.format.outputs.files_changed == 'true'
-        run: |
-          echo "### ✅ Post-Formatting Document Fingerprints (Verified)" >> $GITHUB_STEP_SUMMARY
-          find . -name "*.md" -o -name "*.mdx" | sort | xargs sha256sum >> $GITHUB_STEP_SUMMARY
-
-      - name: Commit and Push Verified Corrections
-        if: steps.format.outputs.files_changed == 'true'
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "style(docs): frictionless invisible auto-formatting [skip ci]"
-          commit_user_name: "github-actions[bot]"
-          commit_user_email: "41898282+github-actions[bot]@users.noreply.github.com"
-          skip_ci: true
+          npx prettier --check "${FILES[@]}"
